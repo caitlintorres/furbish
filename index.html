@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Furbish Translator (MVP)</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 2rem; max-width: 860px }
+    textarea { width: 100%; min-height: 120px; }
+    .row { display: grid; gap: 1rem; grid-template-columns: 1fr 1fr; margin-top: 1rem; }
+    .badges span { padding: 0.25rem 0.5rem; border-radius: 0.375rem; margin-right: .5rem; font-size: .8rem }
+    .strong{ background:#e7f7ec; }
+    .medium{ background:#eef2ff; }
+    .low{ background:#fff3cd; }
+    .small{font-size:.85rem;color:#555}
+    .muted{color:#666}
+    .out{white-space:pre-wrap;border:1px solid #ddd;border-radius:8px;padding:12px;min-height:120px}
+  </style>
+</head>
+<body>
+  <h1>Furbish Translator</h1>
+  <p class="muted">Type English, get best-effort Furbish. Dictionary words are preferred; phrases/compounds and phonetic fallbacks fill the gaps.</p>
+  <div class="row">
+    <div>
+      <label for="in">English</label>
+      <textarea id="in" placeholder="e.g., Are you hungry? I love my friend."></textarea>
+      <div class="small badges">
+        <span class="strong">strong = dictionary</span>
+        <span class="medium">medium = template/compound</span>
+        <span class="low">low = fallback</span>
+      </div>
+      <button id="btn">Translate →</button>
+    </div>
+    <div>
+      <label>Furbish</label>
+      <div id="out" class="out"></div>
+      <div id="legend" class="small muted"></div>
+    </div>
+  </div>
+
+<script>
+/** Minimal, curated dictionary (English → Furbish), from official lists. */
+// A few dozen to start; extend freely. Sources: official word lists & Furby Wiki.
+const DICT = new Map(Object.entries({
+  "yes": "doo-dah",           // also "ee" in some lists
+  "no": "boo",
+  "again": "koh-koh",
+  "and": "koh",
+  "ask": "oh-too-mah",
+  "baby": "bay-bee",
+  "bad": "boo-dah",
+  "be": "boh",
+  "pretty": "ee-kah",
+  "beautiful": "ee-kah",
+  "big": "dah",
+  "bye": "bye-bye",
+  "change": "boo-tay",
+  "cloud": "ay-loh-may-lah",
+  "dance": "noh-lah",
+  "diamond": "ay-koo",
+  "dizzy": "ay-way",
+  "do": "doo-dah",
+  "done": "toh-dye",
+  "down": "nah-bah",
+  "dream": "way-loo",
+  "friend": "noo-lah",
+  "buddy": "noo-lah",
+  "food": "ah-tah",
+  "feed": "ah-tah",
+  "hungry": "ay-tay",
+  "hello": "doo?",            // Furbies say "doo?" when called
+  "what": "doo?",
+  "joke": "wee-tah-kah-loo-loo", // voice-command lexicon
+  "story": "wee-tah-kah-wee-loo",
+  "song": "wee-tee-kah-wah-tee",
+  "sleep": "way-loh-nee-way",
+  "play": "loo-lay",
+  "love": "may-may",
+  "good": "doo-oo-tye?",      // placeholder; expand as needed
+  "friendship": "noo-lah may-may",
+  "light": "a-loh",
+  "sun": "a-loh",
+  "me": "kah",
+  "i": "kah",
+  "you": "u-nye"
+}));
+
+/** Canonical phrase templates (regex → replacement) */
+const PHRASES = [
+  // Are you hungry? → u-nye-ay-tay-doo?
+  { re: /\b(are\s+)?you\s+hungry\??\b/i, out: "u-nye-ay-tay-doo?", conf:"medium" },
+  // Do you want to play? → u-nye-loo-lay-doo?
+  { re: /\b(do\s+)?you\s+(want\s+to\s+)?play\??\b/i, out: "u-nye-loo-lay-doo?", conf:"medium" },
+  // How are you? → u-nye-boh-doo?
+  { re: /\bhow\s+are\s+you\??\b/i, out: "u-nye-boh-doo?", conf:"medium" },
+  // Go to sleep now. → u-nye-way-loh-nee-way
+  { re: /\b(go\s+to\s+)?sleep\s+(now)?\.?\b/i, out: "u-nye-way-loh-nee-way", conf:"medium" },
+];
+
+/** Booster: "very X" / "really X" ⇒ "dah X" */
+function applyBoosters(tokens) {
+  const out = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const tok = tokens[i];
+    const w = (tok && typeof tok === "object" ? tok.word : tok);
+    const wl = (w ?? "").toString().toLowerCase();
+
+    if (wl === "very" || wl === "really") {
+      // Insert the Furbish booster "dah" before the next word
+      if (i + 1 < tokens.length) out.push({ word: "dah", conf: "medium" });
+      continue; // skip the English booster token
+    }
+
+    // keep the original token object as-is
+    out.push(tok);
+  }
+  return out;
+}
+
+
+/** Simple tokenizer that keeps punctuation */
+function tokenize(s) {
+  const parts = s.match(/[A-Za-z']+|[\u2019’]|[?.!,;:()-]/g) || [];
+  return parts;
+}
+
+/** Fallback romanizer: map unknown words to Furbish-like CV syllables */
+const SYL = ["doo","dah","ee","ay","kah","loh","may","nah","boo","noo","tah","toh","loo","way","koh","bah","bee","lah","koo","tay","u-nye"];
+function romanize(word) {
+  // Make something pronounceable with hyphenated syllabus
+  const n = Math.max(1, Math.min(3, Math.ceil(word.length/3)));
+  const bits = [];
+  for (let i=0;i<n;i++) bits.push(SYL[(word.charCodeAt(i % word.length)+i) % SYL.length]);
+  return bits.join("-");
+}
+
+/** Core translator */
+function translate(input) {
+  let working = input;
+
+  // 1) Phrase templates
+  const hits = [];
+  PHRASES.forEach(p => {
+    if (p.re.test(working)) {
+      working = working.replace(p.re, p.out);
+      hits.push({text:p.out, conf:p.conf});
+    }
+  });
+
+  // 2) Token-by-token mapping
+  const tokens = tokenize(working).map(t => ({word:t, conf:null}));
+  const boosted = applyBoosters(tokens);
+
+  const mapped = boosted.map(tok => {
+    const w = tok.word;
+    if (/^[A-Za-z']+$/.test(w)) {
+      const lower = w.toLowerCase();
+      if (DICT.has(lower)) return {word: DICT.get(lower), conf: tok.conf || "strong"};
+      // plural naive strip 's
+      const base = lower.replace(/'s$/, "").replace(/s$/, "");
+      if (DICT.has(base)) return {word: DICT.get(base), conf: tok.conf || "strong"};
+      // unknown: fallback romanization
+      return {word: romanize(lower), conf: "low"};
+    } else {
+      return {word: w, conf: tok.conf || null};
+    }
+  });
+
+  // Stitch and annotate legend
+  const out = mapped.map(m => m.word).join(" ").replace(/\s+([?.!,;:])/g, "$1");
+  const counts = {strong:0, medium:0, low:0};
+  mapped.forEach(m => { if (m.conf) counts[m.conf]++; });
+
+  return { text: out, counts };
+}
+
+document.getElementById('btn').addEventListener('click', () => {
+  const input = document.getElementById('in').value.trim();
+  const {text, counts} = translate(input);
+  document.getElementById('out').textContent = text || "…";
+  document.getElementById('legend').textContent =
+    `confidence — strong:${counts.strong} medium:${counts.medium} low:${counts.low}`;
+});
+</script>
+</body>
+</html>
